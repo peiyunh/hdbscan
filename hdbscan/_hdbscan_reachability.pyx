@@ -59,6 +59,51 @@ def mutual_reachability(distance_matrix, min_points=5, alpha=1.0):
     return result
 
 
+def precomputed_mutual_reachability(distance_matrix, core_distances, alpha=1.0):
+    """Compute the weighted adjacency matrix of the mutual reachability
+    graph of a distance matrix.
+
+    Parameters
+    ----------
+    distance_matrix : ndarray, shape (n_samples, n_samples)
+        Array of distances between samples.
+
+    min_points : int, optional (default=5)
+        The number of points in a neighbourhood for a point to be considered
+        a core point.
+
+    Returns
+    -------
+    mututal_reachability: ndarray, shape (n_samples, n_samples)
+        Weighted adjacency matrix of the mutual reachability graph.
+
+    References
+    ----------
+    .. [1] Campello, R. J., Moulavi, D., & Sander, J. (2013, April).
+       Density-based clustering based on hierarchical density estimates.
+       In Pacific-Asia Conference on Knowledge Discovery and Data Mining
+       (pp. 160-172). Springer Berlin Heidelberg.
+    """
+    size = distance_matrix.shape[0]
+    # min_points = min(size - 1, min_points)
+    # try:
+    #     core_distances = np.partition(distance_matrix,
+    #                                   min_points,
+    #                                   axis=0)[min_points]
+    # except AttributeError:
+    #     core_distances = np.sort(distance_matrix,
+    #                              axis=0)[min_points]
+
+    if alpha != 1.0:
+        distance_matrix = distance_matrix / alpha
+
+    stage1 = np.where(core_distances > distance_matrix,
+                      core_distances, distance_matrix)
+    result = np.where(core_distances > stage1.T,
+                      core_distances.T, stage1.T).T
+    return result
+
+
 cpdef sparse_mutual_reachability(object lil_matrix, np.intp_t min_points=5,
                                  float alpha=1.0, float max_dist=0.):
 

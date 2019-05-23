@@ -27,6 +27,7 @@ from ._hdbscan_tree import (condense_tree,
                             get_clusters,
                             outlier_scores)
 from ._hdbscan_reachability import (mutual_reachability,
+                                    precomputed_mutual_reachability,
                                     sparse_mutual_reachability)
 
 from ._hdbscan_boruvka import KDTreeBoruvkaAlgorithm, BallTreeBoruvkaAlgorithm
@@ -63,6 +64,69 @@ def _tree_to_labels(X, single_linkage_tree, min_cluster_size=10,
 
     return (labels, probabilities, stabilities, condensed_tree,
             single_linkage_tree)
+
+def _hdbscan_precomputed(X, core_distances, min_samples=5, alpha=1.0, metric='minkowski', p=2,
+                     leaf_size=None, gen_min_span_tree=False, **kwargs):
+    if metric == 'minkowski':
+        distance_matrix = pairwise_distances(X, metric=metric, p=p)
+    elif metric == 'arccos':
+        distance_matrix = pairwise_distances(X, metric='cosine', **kwargs)
+    elif metric == 'precomputed':
+        # Treating this case explicitly, instead of letting
+        #   sklearn.metrics.pairwise_distances handle it,
+        #   enables the usage of numpy.inf in the distance
+        #   matrix to indicate missing distance information.
+        # TODO: Check if copying is necessary
+        distance_matrix = X.copy()
+    else:
+        distance_matrix = pairwise_distances(X, metric=metric, **kwargs)
+
+    if issparse(distance_matrix):
+        # raise TypeError('Sparse distance matrices not yet supported')
+        return _hdbscan_sparse_distance_matrix(distance_matrix, min_samples,
+                                               alpha, metric, p,
+                                               leaf_size, gen_min_span_tree,
+                                               **kwargs)
+
+    # mutual_reachability_ = mutual_reachability(distance_matrix,
+    #                                            min_samples, alpha)
+    mutual_reachability_ = precomputed_mutual_reachability(distance_matrix, 
+                                              core_distances, alpha)
+
+    min_spanning_tree = mst_linkage_core(mutual_reachability_)
+
+    # Warn if the MST couldn't be constructed around the missing distances
+    if np.isinf(min_spanning_tree.T[2]).any():
+        warn('The minimum spanning tree contains edge weights with value '
+             'infinity. Potentially, you are missing too many distances '
+             'in the initial distance matrix for the given neighborhood '
+             'size.', UserWarning)
+
+    # mst_linkage_core does not generate a full minimal spanning tree
+    # If a tree is required then we must build the edges from the information
+    # returned by mst_linkage_core (i.e. just the order of points to be merged)
+    if gen_min_span_tree:
+        result_min_span_tree = min_spanning_tree.copy()
+        for index, row in enumerate(result_min_span_tree[1:], 1):
+            candidates = np.where(isclose(mutual_reachability_[int(row[1])],
+                                          row[2]))[0]
+            candidates = np.intersect1d(candidates,
+                                        min_spanning_tree[:index, :2].astype(
+                                            int))
+            candidates = candidates[candidates != row[1]]
+            assert len(candidates) > 0
+            row[0] = candidates[0]
+    else:
+        result_min_span_tree = None
+
+    # Sort edges of the min_spanning_tree by weight
+    min_spanning_tree = min_spanning_tree[np.argsort(min_spanning_tree.T[2]),
+                        :]
+
+    # Convert edge list into standard hierarchical clustering format
+    single_linkage_tree = label(min_spanning_tree)
+
+    return single_linkage_tree, result_min_span_tree
 
 
 def _hdbscan_generic(X, min_samples=5, alpha=1.0, metric='minkowski', p=2,
@@ -327,7 +391,7 @@ def check_precomputed_distance_matrix(X):
     check_array(tmp)
 
 
-def hdbscan(X, min_cluster_size=5, min_samples=None, alpha=1.0,
+def hdbscan(X, core_distances=None, min_cluster_size=5, min_samples=None, alpha=1.0,
             metric='minkowski', p=2, leaf_size=40,
             algorithm='best', memory=Memory(cachedir=None, verbose=0),
             approx_min_span_tree=True, gen_min_span_tree=False,
@@ -525,7 +589,12 @@ def hdbscan(X, min_cluster_size=5, min_samples=None, alpha=1.0,
     if min_samples == 0:
         min_samples = 1
 
-    if algorithm != 'best':
+    if core_distances is not None: 
+        (single_linkage_tree,
+            result_min_span_tree) = memory.cache(
+            _hdbscan_precomputed)(X, core_distances, min_samples, alpha, metric,
+                                p, leaf_size, gen_min_span_tree, **kwargs)
+    elif algorithm != 'best':
         if metric != 'precomputed' and issparse(X) and metric != 'generic':
             raise ValueError("Sparse data matrices only support algorithm 'generic'.")
                   
@@ -815,7 +884,7 @@ class HDBSCAN(BaseEstimator, ClusterMixin):
 
     """
 
-    def __init__(self, min_cluster_size=5, min_samples=None,
+    def __init__(self, core_distances=None, min_cluster_size=5, min_samples=None,
                  metric='euclidean', alpha=1.0, p=None,
                  algorithm='best', leaf_size=40,
                  memory=Memory(cachedir=None, verbose=0),
@@ -826,6 +895,9 @@ class HDBSCAN(BaseEstimator, ClusterMixin):
                  allow_single_cluster=False,
                  prediction_data=False,
                  match_reference_implementation=False, **kwargs):
+        #
+        self.core_distances = core_distances 
+
         self.min_cluster_size = min_cluster_size
         self.min_samples = min_samples
         self.alpha = alpha
